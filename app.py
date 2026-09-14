@@ -26,12 +26,23 @@ WAREKI = {'明治': 1868, '大正': 1912, '昭和': 1926, '平成': 1989, '令�
 
 
 def wareki_to_year(s):
+    """和暦・西暦どちらの記載からも西暦の年を取り出す。"""
     for era, base in WAREKI.items():
-        m = re.search(era + r'(\d+)年', s)
+        m = re.search(era + r'\s*(\d+|元)\s*年', s)
         if m:
-            return base + int(m.group(1)) - 1
-    m = re.search(r'(\d{4})年', s)
+            n = 1 if m.group(1) == '元' else int(m.group(1))
+            return base + n - 1
+    m = re.search(r'(\d{4})\s*年', s)
     return int(m.group(1)) if m else None
+
+
+def extract_month(s):
+    """「平成3年3月」「1997年07月」などから月を取り出す。見つからなければ None。"""
+    m = re.search(r'年\s*(\d{1,2})\s*月', s)
+    if not m:
+        return None
+    month = int(m.group(1))
+    return month if 1 <= month <= 12 else None
 
 
 def parse_num(s):
@@ -154,7 +165,9 @@ def parse_pdf(text):
         year = wareki_to_year(m.group(1))
         if year:
             d['age'] = CURRENT_YEAR - year
-            d['age_str'] = f'{year}年'  # 和暦・西暦どちらの記載でも西暦に統一
+            # 和暦・西暦どちらの記載でも「西暦の年月」に統一（例: 平成3年3月 → 1991年3月）
+            month = extract_month(m.group(1))
+            d['age_str'] = f'{year}年{month}月' if month else f'{year}年'
 
     # 面積
     m = re.search(r'(?:専有面積|使用部分)[^\d]*([\d.]+)\s*㎡', text)
@@ -509,5 +522,5 @@ st.caption(
     '※ 敷金・礼金は「◯ヶ月」表記の場合、**家賃（管理費・水道料金を含まない金額）×月数** で円に換算しています。'
     'Excelには「家賃」列は出力されません（確認用の表示です）。'
 )
-st.caption('※ 築年数は和暦の記載でも西暦（例：1991年）に統一して表示します。')
+st.caption('※ 築年数は和暦の記載でも西暦の年月（例：平成3年3月 → 1991年3月）に統一して表示します。')
 st.caption('※ 画像スキャンのPDFは文字が取り出せないため自動抽出できません。その場合は表に手入力してください。')
