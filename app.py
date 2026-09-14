@@ -46,6 +46,58 @@ def has_eq(text, *patterns):
     return '〇' if any(re.search(p, text) for p in patterns) else '×'
 
 
+# 敷金・礼金の直後に続きうる別項目のラベル（ここで打ち切る）
+NEXT_LABEL = r'(礼金|敷金|保証金|敷引|償却|解約|管理費|共益費|水道|駐車|更新|仲介|A\s*D|AD)'
+
+
+def grab_field(label, text, width=20):
+    """label の直後の値を、次の項目ラベルの手前まで取り出す。"""
+    m = re.search(label + r'[：:\s]*([^\n]{0,%d})' % width, text)
+    if not m:
+        return ''
+    return re.split(NEXT_LABEL, m.group(1))[0].strip()
+
+
+def to_yen(raw, rent):
+    """敷金・礼金の記載を金額(円)に正規化する。
+
+    「1ヶ月」「1.5ヶ月」のような月数表記は、総賃料ではなく家賃(rent)を基準に換算する。
+    家賃が取得できていない場合は換算せず、原文をそのまま返す。
+    """
+    if raw is None:
+        return ''
+    s = re.sub(r'[,，\s]', '', str(raw))
+    if not s:
+        return ''
+    if re.search(r'(なし|無し|不要|ゼロ|^[-－ー―]+$)', s):
+        return 0
+
+    # 月数表記（1ヶ月 / 1.5ヵ月 / 2カ月 …）→ 家賃 × 月数
+    m = re.search(r'([\d.]+)\s*[ヶヵケカか箇]?月', s)
+    if m:
+        months = float(m.group(1))
+        if months == 0:
+            return 0
+        return int(round(rent * months)) if rent else str(raw).strip()
+
+    # 万円表記
+    m = re.search(r'([\d.]+)\s*万', s)
+    if m:
+        return int(float(m.group(1)) * 10000)
+
+    # 数値のみ。家賃より明らかに小さい端数は月数表記とみなす（例:「敷金 1」＝1ヶ月）
+    m = re.search(r'\d+(?:\.\d+)?', s)
+    if m:
+        v = float(m.group())
+        if v == 0:
+            return 0
+        if v < 100 and rent:
+            return int(round(rent * v))
+        return int(v)
+
+    return ''
+
+
 def extract_text(file_bytes):
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
         pages = [p.extract_text() for p in pdf.pages if p.extract_text()]
@@ -101,18 +153,8 @@ def parse_pdf(text):
     if m:
         year = wareki_to_year(m.group(1))
         if year:
-            age = CURRENT_YEAR - year
-            d['age'] = age
-            if age <= 1:
-                d['age_str'] = '新築'
-            elif year >= 2019:
-                d['age_str'] = f'令和{year - 2018}年'
-            elif year >= 1989:
-                d['age_str'] = f'平成{year - 1988}年'
-            elif year >= 1926:
-                d['age_str'] = f'昭和{year - 1925}年'
-            else:
-                d['age_str'] = f'{year}年'
+            d['age'] = CURRENT_YEAR - year
+            d['age_str'] = f'{year}年'  # 和暦・西暦どちらの記載でも西暦に統一
 
     # 面積
     m = re.search(r'(?:専有面積|使用部分)[^\d]*([\d.]+)\s*㎡', text)
@@ -190,22 +232,9 @@ def parse_pdf(text):
     d['mgmt'] = mgmt
     d['total_rent'] = rent + mgmt + water
 
-    # 敷金
-    m = re.search(r'敷金\s+([^\n\s]+)', text)
-    if m:
-        v = m.group(1).strip()
-        d['deposit'] = '' if v in ['なし', '-', '0', '0円'] else v
-
-    # 礼金
-    m = re.search(r'礼金\s+([\d]+)\s*円', text)
-    if m:
-        v = int(m.group(1))
-        d['key_money'] = '' if v == 0 else str(v) + '円'
-    else:
-        m = re.search(r'礼金\s+([^\n\s]+)', text)
-        if m:
-            v = m.group(1).strip()
-            d['key_money'] = '' if v in ['なし', '0', '0円', '-'] else v
+    # 敷金・礼金（月数表記は「家賃」基準で金額に換算。総賃料は使わない）
+    d['deposit'] = to_yen(grab_field('敷金', text), rent)
+    d['key_money'] = to_yen(grab_field('礼金', text), rent)
 
     # 広告料（「A D 2ヶ月」「AD 150%」等、%優先）
     m = re.search(r'A\s*D\s+(\d+)\s*(%|[ヶヵ]月|ヶ月|ヵ月|月)?', text)
@@ -322,7 +351,8 @@ def _write_row(ws, row_num, prop, copy_style):
 COLUMNS = [
     ('name', '物件名'), ('age_str', '築年数'), ('area', '㎡数'), ('layout', '間取'),
     ('address', '住所'), ('station', '駅'), ('walk', '徒歩'), ('structure', '構造'),
-    ('total_rent', '合計賃料'), ('deposit', '敷金'), ('key_money', '礼金'), ('ad', '広告料'),
+    ('rent', '家賃'), ('total_rent', '合計賃料'), ('deposit', '敷金'),
+    ('key_money', '礼金'), ('ad', '広告料'),
     ('ev', 'ＥＶ'), ('al', 'ＡＬ'), ('laundry', '室内洗濯'), ('dressing', '脱衣所'),
     ('bath_dry', '浴室乾燥'), ('reheat', '追炊き'), ('kitchen', 'キッチン'),
     ('shampoo', 'シャンドレ'), ('shoe_box', 'シューズBOX'), ('delivery', '宅配BOX'),
@@ -330,8 +360,9 @@ COLUMNS = [
 ]
 EQ_KEYS = ['ev', 'al', 'laundry', 'dressing', 'bath_dry', 'reheat', 'kitchen',
            'shampoo', 'shoe_box', 'delivery', 'ac', 'washlet']
-KEY_TO_LABEL = dict(COLUMNS)
-LABEL_TO_KEY = {v: k for k, v in COLUMNS}
+# 数値として扱う項目（Excelでそのまま計算・並べ替えできるようにする）
+INT_KEYS = ['walk', 'rent', 'total_rent', 'deposit', 'key_money']
+FLOAT_KEYS = ['area']
 
 
 def to_dataframe(records):
@@ -344,7 +375,16 @@ def to_dataframe(records):
                 v = '×'
             row[label] = '' if v is None else v
         rows.append(row)
-    return pd.DataFrame(rows, columns=[label for _, label in COLUMNS])
+    df = pd.DataFrame(rows, columns=[label for _, label in COLUMNS])
+
+    for key, label in COLUMNS:
+        if key in INT_KEYS:
+            df[label] = pd.to_numeric(df[label], errors='coerce').astype('Int64')
+        elif key in FLOAT_KEYS:
+            df[label] = pd.to_numeric(df[label], errors='coerce').astype('Float64')
+        else:
+            df[label] = df[label].astype('string')
+    return df
 
 
 def from_dataframe(df):
@@ -353,9 +393,14 @@ def from_dataframe(df):
         rec = {}
         for key, label in COLUMNS:
             v = row.get(label, '')
-            if pd.isna(v):
-                v = ''
-            rec[key] = v
+            if v is None or (not isinstance(v, str) and pd.isna(v)):
+                rec[key] = ''
+            elif key in INT_KEYS:
+                rec[key] = int(v)
+            elif key in FLOAT_KEYS:
+                rec[key] = float(v)
+            else:
+                rec[key] = v
         records.append(rec)
     return records
 
@@ -413,9 +458,12 @@ if st.session_state.records:
         if key in EQ_KEYS:
             col_config[label] = st.column_config.SelectboxColumn(
                 label, options=['〇', '×'], width='small')
-        elif key == 'name':
-            col_config[label] = st.column_config.TextColumn(label, width='medium')
-        elif key == 'address':
+        elif key in INT_KEYS:
+            col_config[label] = st.column_config.NumberColumn(
+                label, format='%d', step=1)
+        elif key in FLOAT_KEYS:
+            col_config[label] = st.column_config.NumberColumn(label, format='%.2f')
+        elif key in ('name', 'address'):
             col_config[label] = st.column_config.TextColumn(label, width='medium')
 
     edited = st.data_editor(
@@ -440,4 +488,9 @@ else:
     st.info('PDFをアップロードして「PDFから抽出」を押してください。')
 
 st.divider()
+st.caption(
+    '※ 敷金・礼金は「◯ヶ月」表記の場合、**家賃（管理費・水道料金を含まない金額）×月数** で円に換算しています。'
+    'Excelには「家賃」列は出力されません（確認用の表示です）。'
+)
+st.caption('※ 築年数は和暦の記載でも西暦（例：1991年）に統一して表示します。')
 st.caption('※ 画像スキャンのPDFは文字が取り出せないため自動抽出できません。その場合は表に手入力してください。')
