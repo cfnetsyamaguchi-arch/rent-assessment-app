@@ -365,7 +365,26 @@ INT_KEYS = ['walk', 'rent', 'total_rent', 'deposit', 'key_money']
 FLOAT_KEYS = ['area']
 
 
+def _fmt(v):
+    """表示用の文字列に整える（60000.0 → "60000"、値なし → ""）。"""
+    if v is None:
+        return ''
+    if isinstance(v, float):
+        if pd.isna(v):
+            return ''
+        if v.is_integer():
+            return str(int(v))
+        return str(v)
+    return str(v)
+
+
 def to_dataframe(records):
+    """編集表用のDataFrameを作る。
+
+    すべて文字列で保持する。数値dtypeにすると、値がないセルが「None」と
+    表示されてしまうため（空欄のほうが査定書として見やすい）。
+    Excelに書き出すときに from_dataframe() で数値に戻す。
+    """
     rows = []
     for r in records:
         row = {}
@@ -373,20 +392,14 @@ def to_dataframe(records):
             v = r.get(key, '')
             if key in EQ_KEYS and v not in ('〇', '×'):
                 v = '×'
-            row[label] = '' if v is None else v
+            row[label] = _fmt(v)
         rows.append(row)
     df = pd.DataFrame(rows, columns=[label for _, label in COLUMNS])
-
-    for key, label in COLUMNS:
-        if key in INT_KEYS or key in FLOAT_KEYS:
-            # float64 + NaN にすると、値なしのセルが空欄として表示される
-            df[label] = pd.to_numeric(df[label], errors='coerce').astype('float64')
-        else:
-            df[label] = df[label].astype('string')
-    return df
+    return df.astype('string').fillna('')
 
 
 def from_dataframe(df):
+    """編集表の内容をレコードに戻す。数値項目は数値型にしてExcelへ渡す。"""
     records = []
     for _, row in df.iterrows():
         rec = {}
@@ -394,12 +407,20 @@ def from_dataframe(df):
             v = row.get(label, '')
             if v is None or (not isinstance(v, str) and pd.isna(v)):
                 rec[key] = ''
-            elif key in INT_KEYS:
-                rec[key] = int(v)
-            elif key in FLOAT_KEYS:
-                rec[key] = float(v)
+                continue
+            s = str(v).strip()
+            if not s:
+                rec[key] = ''
+            elif key in INT_KEYS or key in FLOAT_KEYS:
+                n = pd.to_numeric(re.sub(r'[,，\s]', '', s), errors='coerce')
+                if pd.isna(n):
+                    rec[key] = s  # 「1ヶ月」など数値化できない記載はそのまま残す
+                elif key in INT_KEYS:
+                    rec[key] = int(round(float(n)))
+                else:
+                    rec[key] = float(n)
             else:
-                rec[key] = v
+                rec[key] = s
         records.append(rec)
     return records
 
@@ -457,11 +478,8 @@ if st.session_state.records:
         if key in EQ_KEYS:
             col_config[label] = st.column_config.SelectboxColumn(
                 label, options=['〇', '×'], width='small')
-        elif key in INT_KEYS:
-            col_config[label] = st.column_config.NumberColumn(
-                label, format='%d', step=1)
-        elif key in FLOAT_KEYS:
-            col_config[label] = st.column_config.NumberColumn(label, format='%.2f')
+        elif key in INT_KEYS or key in FLOAT_KEYS:
+            col_config[label] = st.column_config.TextColumn(label, width='small')
         elif key in ('name', 'address'):
             col_config[label] = st.column_config.TextColumn(label, width='medium')
 
