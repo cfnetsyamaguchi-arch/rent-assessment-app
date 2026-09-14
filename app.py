@@ -378,10 +378,9 @@ def to_dataframe(records):
     df = pd.DataFrame(rows, columns=[label for _, label in COLUMNS])
 
     for key, label in COLUMNS:
-        if key in INT_KEYS:
-            df[label] = pd.to_numeric(df[label], errors='coerce').astype('Int64')
-        elif key in FLOAT_KEYS:
-            df[label] = pd.to_numeric(df[label], errors='coerce').astype('Float64')
+        if key in INT_KEYS or key in FLOAT_KEYS:
+            # float64 + NaN にすると、値なしのセルが空欄として表示される
+            df[label] = pd.to_numeric(df[label], errors='coerce').astype('float64')
         else:
             df[label] = df[label].astype('string')
     return df
@@ -468,7 +467,7 @@ if st.session_state.records:
 
     edited = st.data_editor(
         df, column_config=col_config, num_rows='dynamic',
-        use_container_width=True, hide_index=True, key='editor')
+        width='stretch', hide_index=True, key='editor')
 
     records = from_dataframe(edited)
     excel_bytes = build_excel(records, tmpl_file.getvalue() if tmpl_file else None)
